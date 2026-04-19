@@ -1046,7 +1046,7 @@ class MiniEngine:
 
         pygame.font.init()
         font_splash = pygame.font.SysFont("Verdana", 24, bold=True)
-        text_splash = font_splash.render("BUILT WITH CAVERN-ENGINE 2026.1", True, (255, 255, 255))
+        text_splash = font_splash.render("BUILT WITH CAVERN-ENGINE 2026.2", True, (255, 255, 255))
         text_rect = text_splash.get_rect(center=(self.screen.get_width()//2, self.screen.get_height()//2 + 150))
 
         show_splash = True
