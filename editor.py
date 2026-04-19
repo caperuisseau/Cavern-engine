@@ -71,46 +71,8 @@ class Camera:
     def apply(self, x, y):
         return (x - self.x) * self.zoom, (y - self.y) * self.zoom
 
-class Particle:
-    def __init__(self, x, y, vx, vy, color, life, size=3, gravity=0):
-        self.x = float(x)
-        self.y = float(y)
-        self.vx = float(vx)
-        self.vy = float(vy)
-        self.color = color
-        self.life = float(life)
-        self.max_life = float(life)
-        self.size = float(size)
-        self.gravity = float(gravity)
-        self.alive = True
-
-    def update(self, dt):
-        self.x += self.vx * dt
-        self.y += self.vy * dt
-        self.vy += self.gravity * dt
-        self.life -= dt
-        if self.life <= 0:
-            self.alive = False
-
-    def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
-        if not self.alive:
-            return
-        alpha = max(0, min(255, int(255 * (self.life / self.max_life))))
-        sx = int((self.x - cam_x) * zoom)
-        sy = int((self.y - cam_y) * zoom)
-        sz = max(1, int(self.size * zoom * (self.life / self.max_life)))
-        if 0 <= sx < screen.get_width() and 0 <= sy < screen.get_height():
-            try:
-                surf = pygame.Surface((sz * 2, sz * 2), pygame.SRCALPHA)
-                col = (*self.color[:3], alpha)
-                pygame.draw.circle(surf, col, (sz, sz), sz)
-                screen.blit(surf, (sx - sz, sy - sz))
-            except Exception:
-                pass
-
 class ParticleEmitter:
     def __init__(self, x, y, ptype="fire", color=(255, 200, 50), speed=100, count=20, spread=360, life=1.0, gravity=0, size=3):
-        import random
         self.x = float(x)
         self.y = float(y)
         self.ptype = ptype
@@ -121,11 +83,15 @@ class ParticleEmitter:
         self.life = float(life)
         self.gravity = float(gravity)
         self.size = float(size)
+        
         self.particles = []
         self.active = True
         self.continuous = False
         self.emit_timer = 0
         self.emit_rate = 0.05
+        
+        if not hasattr(ParticleEmitter, '_surf_cache'):
+            ParticleEmitter._surf_cache = {}
 
     def burst(self):
         import random
@@ -134,9 +100,12 @@ class ParticleEmitter:
             spd = self.speed * random.uniform(0.5, 1.5)
             vx = math.cos(angle) * spd
             vy = -math.sin(angle) * spd
-            c = tuple(max(0, min(255, ch + random.randint(-30, 30))) for ch in self.color[:3])
-            p = Particle(self.x, self.y, vx, vy, c, self.life * random.uniform(0.5, 1.2), self.size, self.gravity)
-            self.particles.append(p)
+            r = max(0, min(255, self.color[0] + random.randint(-30, 30)))
+            g = max(0, min(255, self.color[1] + random.randint(-30, 30)))
+            b = max(0, min(255, self.color[2] + random.randint(-30, 30)))
+            max_life = self.life * random.uniform(0.5, 1.2)
+            
+            self.particles.append([self.x, self.y, vx, vy, max_life, max_life, r, g, b, self.size])
 
     def goto(self, x, y):
         self.x, self.y = float(x), float(y)
@@ -155,17 +124,43 @@ class ParticleEmitter:
                 spd = self.speed * random.uniform(0.5, 1.5)
                 vx = math.cos(angle) * spd
                 vy = -math.sin(angle) * spd
-                c = tuple(max(0, min(255, ch + random.randint(-30, 30))) for ch in self.color[:3])
-                p = Particle(self.x, self.y, vx, vy, c, self.life * random.uniform(0.5, 1.2), self.size, self.gravity)
-                self.particles.append(p)
+                r = max(0, min(255, self.color[0] + random.randint(-30, 30)))
+                g = max(0, min(255, self.color[1] + random.randint(-30, 30)))
+                b = max(0, min(255, self.color[2] + random.randint(-30, 30)))
+                max_life = self.life * random.uniform(0.5, 1.2)
+                self.particles.append([self.x, self.y, vx, vy, max_life, max_life, r, g, b, self.size])
 
-        for p in self.particles:
-            p.update(dt)
-        self.particles = [p for p in self.particles if p.alive]
+        i = 0
+        while i < len(self.particles):
+            p = self.particles[i]
+            p[0] += p[2] * dt
+            p[1] += p[3] * dt
+            p[3] += self.gravity * dt
+            p[4] -= dt
+            if p[4] <= 0:
+                self.particles.pop(i)
+            else:
+                i += 1
 
     def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
+        sw, sh = screen.get_width(), screen.get_height()
+        
         for p in self.particles:
-            p.draw(screen, cam_x, cam_y, zoom)
+            alpha = max(0, min(255, int(255 * (p[4] / p[5]))))
+            sx = int((p[0] - cam_x) * zoom)
+            sy = int((p[1] - cam_y) * zoom)
+            sz = max(1, int(p[9] * zoom * (p[4] / p[5])))
+            
+            if 0 <= sx < sw and 0 <= sy < sh:
+                cache_key = (sz, p[6], p[7], p[8], alpha)
+                if cache_key not in ParticleEmitter._surf_cache:
+                    if len(ParticleEmitter._surf_cache) > 1000:
+                        ParticleEmitter._surf_cache.clear()
+                    surf = pygame.Surface((sz * 2, sz * 2), pygame.SRCALPHA)
+                    pygame.draw.circle(surf, (p[6], p[7], p[8], alpha), (sz, sz), sz)
+                    ParticleEmitter._surf_cache[cache_key] = surf
+                
+                screen.blit(ParticleEmitter._surf_cache[cache_key], (sx - sz, sy - sz))
 
 class Light:
     def __init__(self, x, y, radius=150, color=(255, 255, 200), intensity=200):
@@ -393,20 +388,34 @@ class AnimatedSprite:
         if self.scale_factor != 1.0:
             self.set_scale(self.scale_factor)
 
-    def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
-        if self.visible:
+    def _get_drawn_image(self, zoom):
+        if not hasattr(self, '_cache_state'):
+            self._cache_state = None
+            self._cached_image = self.image
+
+        current_state = (self.image, self.angle, zoom, self.alpha)
+        if self._cache_state != current_state:
             temp_img = self.image
             if self.angle != 0:
-                temp_img = pygame.transform.rotate(self.image, self.angle)
-
+                temp_img = pygame.transform.rotate(temp_img, self.angle)
             if zoom != 1.0:
                 zw = int(temp_img.get_width() * zoom)
                 zh = int(temp_img.get_height() * zoom)
-                temp_img = pygame.transform.scale(temp_img, (zw, zh))
-
+                if zw > 0 and zh > 0:
+                    temp_img = pygame.transform.scale(temp_img, (zw, zh))
             if self.alpha < 255:
                 temp_img = temp_img.copy()
                 temp_img.set_alpha(self.alpha)
+                
+            self._cached_image = temp_img
+            self._cache_state = current_state
+            
+        return self._cached_image
+
+    def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
+        if self.visible:
+            temp_img = self._get_drawn_image(zoom)
+            if temp_img.get_width() <= 0 or temp_img.get_height() <= 0: return
 
             sx = (self.x - cam_x) * zoom
             sy = (self.y - cam_y) * zoom
@@ -543,20 +552,34 @@ class Sprite:
         dist = math.sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
         return dist < (self.collision_radius + other.collision_radius)
 
-    def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
-        if self.visible:
+    def _get_drawn_image(self, zoom):
+        if not hasattr(self, '_cache_state'):
+            self._cache_state = None
+            self._cached_image = self.image
+
+        current_state = (self.image, self.angle, zoom, self.alpha)
+        if self._cache_state != current_state:
             temp_img = self.image
             if self.angle != 0:
-                temp_img = pygame.transform.rotate(self.image, self.angle)
-
+                temp_img = pygame.transform.rotate(temp_img, self.angle)
             if zoom != 1.0:
                 zw = int(temp_img.get_width() * zoom)
                 zh = int(temp_img.get_height() * zoom)
-                temp_img = pygame.transform.scale(temp_img, (zw, zh))
-
+                if zw > 0 and zh > 0:
+                    temp_img = pygame.transform.scale(temp_img, (zw, zh))
             if self.alpha < 255:
                 temp_img = temp_img.copy()
                 temp_img.set_alpha(self.alpha)
+                
+            self._cached_image = temp_img
+            self._cache_state = current_state
+            
+        return self._cached_image
+
+    def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
+        if self.visible:
+            temp_img = self._get_drawn_image(zoom)
+            if temp_img.get_width() <= 0 or temp_img.get_height() <= 0: return
 
             sx = (self.x - cam_x) * zoom
             sy = (self.y - cam_y) * zoom
@@ -636,11 +659,24 @@ class MiniEngine:
             self.joysticks.append(j)
 
         self.wait_timers = []
-
+        self.every_timers = []
+        
         self.scenes = {}
         self.current_scene = None
 
         self.watched_vars = {}
+        
+        self.fade_alpha = 0
+        self.fade_target = 0
+        self.fade_speed = 0
+        
+        self.dialog_active = False
+        self.dialog_speaker = ""
+        self.dialog_text = ""
+        self.dialog_visible_chars = 0
+        self.dialog_timer = 0
+        self.dialog_speed = 0.05
+        self.dialog_font = None
 
     def set_fps(self, fps):
         self.fps = int(fps)
@@ -663,6 +699,9 @@ class MiniEngine:
             self.sprites.remove(sprite)
         for g in self.sprite_groups.values():
             g.remove(sprite)
+            
+    def kill(self, sprite):
+        self.destroy(sprite)
 
     def create_group(self, name):
         self.sprite_groups[name] = SpriteGroup()
@@ -821,6 +860,9 @@ class MiniEngine:
     def wait(self, seconds, callback):
         self.wait_timers.append({"remaining": float(seconds), "callback": callback})
 
+    def every(self, seconds, callback):
+        self.every_timers.append({"interval": float(seconds), "remaining": float(seconds), "callback": callback})
+
     def _update_timers(self, dt):
         finished = []
         for timer in self.wait_timers:
@@ -830,6 +872,58 @@ class MiniEngine:
                 finished.append(timer)
         for t in finished:
             self.wait_timers.remove(t)
+            
+        for timer in self.every_timers:
+            timer["remaining"] -= dt
+            if timer["remaining"] <= 0:
+                timer["callback"]()
+                timer["remaining"] += timer["interval"]
+
+    def blink(self, sprite, duration):
+        if sprite in self.sprites:
+            sprite.visible = not sprite.visible
+            self.wait(duration, lambda: self.blink(sprite, duration))
+        
+    def bounce(self, sprite, force):
+        sprite.apply_force(0, -float(force))
+    
+    def play_sound_at(self, path, source_x, source_y, listener_x, listener_y, max_dist=500):
+        self.spatial_sound(path, source_x, source_y, listener_x, listener_y, max_dist)
+        
+    def fade_screen(self, direction, duration):
+        if direction.upper() == "OUT":
+            self.fade_target = 255
+        else:
+            self.fade_target = 0
+        self.fade_speed = 255.0 / max(0.01, float(duration))
+
+    def show_dialog(self, speaker, text, speed=0.05):
+        self.dialog_active = True
+        self.dialog_speaker = speaker
+        self.dialog_text = text
+        self.dialog_visible_chars = 0
+        self.dialog_timer = 0
+        self.dialog_speed = float(speed)
+        if self.dialog_font is None:
+            self.dialog_font = pygame.font.SysFont("Verdana", 20, bold=True)
+            self.dialog_body_font = pygame.font.SysFont("Verdana", 18)
+
+    def save_var(self, name, val, path):
+        import json
+        try:
+            data = {}
+            if os.path.exists(path):
+                with open(path, 'r') as f: data = json.load(f)
+            data[name] = val
+            with open(path, 'w') as f: json.dump(data, f)
+        except: pass
+
+    def load_var(self, path, name, default=0):
+        import json
+        try:
+            with open(path, 'r') as f: data = json.load(f)
+            return data.get(name, default)
+        except: return default
 
     def lerp(self, a, b, t):
         return a + (b - a) * max(0, min(1, float(t)))
@@ -1011,6 +1105,19 @@ class MiniEngine:
             if self.update_func:
                 self.update_func(dt)
 
+            if self.fade_alpha != self.fade_target:
+                if self.fade_alpha < self.fade_target:
+                    self.fade_alpha = min(self.fade_target, self.fade_alpha + self.fade_speed * dt)
+                else:
+                    self.fade_alpha = max(self.fade_target, self.fade_alpha - self.fade_speed * dt)
+
+            if self.dialog_active:
+                self.dialog_timer += dt
+                if self.dialog_timer >= self.dialog_speed:
+                    self.dialog_timer = 0
+                    if self.dialog_visible_chars < len(self.dialog_text):
+                        self.dialog_visible_chars += 1
+
             self.screen.fill(self.bg_color)
 
             for layer in self.parallax_layers:
@@ -1037,6 +1144,30 @@ class MiniEngine:
 
             if self.bloom_enabled or self.blur_enabled or self.grayscale_enabled:
                 self.screen = self._apply_post_processing(self.screen)
+
+            if self.dialog_active:
+                dw, dh = self.width - 100, 150
+                dx, dy = 50, self.height - 200
+                pygame.draw.rect(self.screen, (20, 20, 40, 230), (dx, dy, dw, dh), border_radius=10)
+                pygame.draw.rect(self.screen, (100, 100, 250), (dx, dy, dw, dh), 3, border_radius=10)
+                
+                s_surf = self.dialog_font.render(self.dialog_speaker, True, (255, 255, 100))
+                self.screen.blit(s_surf, (dx + 20, dy + 15))
+                
+                current_text = self.dialog_text[:self.dialog_visible_chars]
+                t_surf = self.dialog_body_font.render(current_text, True, (255, 255, 255))
+                self.screen.blit(t_surf, (dx + 20, dy + 50))
+                
+                if self.is_key_pressed("SPACE") or self.is_mouse_clicked():
+                    if self.dialog_visible_chars < len(self.dialog_text):
+                        self.dialog_visible_chars = len(self.dialog_text)
+                    else:
+                        self.dialog_active = False
+
+            if self.fade_alpha > 0:
+                fade_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                fade_surf.fill((0, 0, 0, int(self.fade_alpha)))
+                self.screen.blit(fade_surf, (0, 0))
 
             pygame.display.flip()
         pygame.quit()
@@ -1091,10 +1222,14 @@ def parse_action(act_str, dt=False):
             mult = " * dt" if dt else ""
             return f'{m[1]}.move({m[2]}{mult}, {m[3]}{mult})'
         elif m[0] == "GOTO": return f'{m[1]}.goto({m[2]}, {m[3]})'
-        elif m[0] == "DESTROY": return f'engine.destroy({m[1]})'
+        elif m[0] == "DESTROY" or m[0] == "KILL": return f'engine.kill({m[1]})'
         elif m[0] == "PLAY_SOUND":
             vol = m[2] if len(m) > 2 else "1.0"
             return f'engine.play_sound({m[1]}, {vol})'
+        elif m[0] == "PLAY_SOUND_AT":
+            return f'engine.play_sound_at({m[1]}, {m[2]}, {m[3]}, {m[4]}, {m[5]})'
+        elif m[0] == "BOUNCE": return f'engine.bounce({m[1]}, {m[2]})'
+        elif m[0] == "BLINK": return f'engine.blink({m[1]}, {m[2]})'
         elif m[0] == "SET_COLOR": return f'{m[1]}.set_color({m[2]}, {m[3]}, {m[4]})'
         elif m[0] == "SHOW": return f'{m[1]}.show()'
         elif m[0] == "HIDE": return f'{m[1]}.hide()'
@@ -1122,6 +1257,12 @@ def parse_action(act_str, dt=False):
         elif m[0] == "SPATIAL_SOUND": return f'engine.spatial_sound({m[1]}, {m[2]}, {m[3]}, {m[4]}, {m[5]})'
         elif m[0] == "FADE_OUT_MUSIC": return f'engine.fade_out_music({m[1] if len(m) > 1 else 1000})'
         elif m[0] == "FADE_IN_MUSIC": return f'engine.fade_in_music({m[1]}, {m[2] if len(m) > 2 else 1000})'
+        elif m[0] == "FADE_SCREEN": return f'engine.fade_screen("{m[1]}", {m[2]})'
+        elif m[0] == "SHOW_DIALOG":
+            speed = m[3] if len(m) > 3 else "0.05"
+            return f'engine.show_dialog({m[1]}, {m[2]}, {speed})'
+        elif m[0] == "SAVE_VAR": return f'engine.save_var({repr(m[1])}, {m[1]}, {m[2]})'
+        elif m[0] == "LOAD_VAR": return f'globals().update({{{repr(m[1])}: engine.load_var({m[2]}, {repr(m[1])}, {m[1]})}})'
         elif m[0] == "STOP_MUSIC": return f'engine.stop_music()'
         elif m[0] == "PAUSE_MUSIC": return f'engine.pause_music()'
         elif m[0] == "RESUME_MUSIC": return f'engine.resume_music()'
@@ -1192,6 +1333,8 @@ def parser_langage_caverne(chemin_source, chemin_destination):
     indentation = 0
     global_vars = []
     user_functions = []
+    block_stack = []
+    block_counter = 0
 
     for i, ligne in enumerate(lignes):
         ligne = ligne.split("#")[0].strip()
@@ -1223,6 +1366,28 @@ def parser_langage_caverne(chemin_source, chemin_destination):
                 elif ligne.startswith("ELIF "):
                     cond = translate_condition(ligne[5:-1].strip())
                     code.append(f"{ind[:-4]}elif {cond}:")
+                    block_stack.append(("ELIF",))
+                elif ligne.startswith("AFTER "):
+                    time_val = ligne[6:-1].strip()
+                    cb_name = f"_cb_block_{block_counter}"
+                    block_counter += 1
+                    code.append(f"{ind}def {cb_name}():")
+                    block_stack.append(("AFTER", time_val, cb_name))
+                elif ligne.startswith("EVERY "):
+                    time_val = ligne[6:-1].strip()
+                    cb_name = f"_cb_block_{block_counter}"
+                    block_counter += 1
+                    code.append(f"{ind}def {cb_name}():")
+                    block_stack.append(("EVERY", time_val, cb_name))
+                elif ligne.startswith("KEY_PRESSED "):
+                    key_val = ligne[12:-1].strip()
+                    code.append(f"{ind}if engine.is_key_pressed('{key_val}'):")
+                    block_stack.append(("KEY_PRESSED",))
+                elif ligne == "MOUSE_CLICKED:":
+                    code.append(f"{ind}if engine.is_mouse_clicked():")
+                    block_stack.append(("MOUSE_CLICKED",))
+                else:
+                    block_stack.append(("OTHER",))
 
                 if not (ligne.startswith("ELSE") or ligne.startswith("ELIF ")):
                     indentation += 1
@@ -1235,6 +1400,14 @@ def parser_langage_caverne(chemin_source, chemin_destination):
                 indentation -= 1
                 dans_block = indentation > 0
                 current_indent = "    " * indentation
+                
+                if block_stack:
+                    b_info = block_stack.pop()
+                    if b_info[0] == "AFTER":
+                        code.append(f"{current_indent}engine.wait({b_info[1]}, {b_info[2]})")
+                    elif b_info[0] == "EVERY":
+                        code.append(f"{current_indent}engine.every({b_info[1]}, {b_info[2]})")
+
                 continue
 
             if ligne == "WHEN UPDATE:":
