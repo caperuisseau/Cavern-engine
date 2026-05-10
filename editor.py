@@ -24,6 +24,8 @@ from PyQt6.QtWidgets import (
     QScrollArea
 )
 
+CAVERN_VERSION = "2026.3"
+
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
 
@@ -35,6 +37,15 @@ PARTICLE_LIFE_MIN_FACTOR = 0.5
 PARTICLE_LIFE_MAX_FACTOR = 1.2
 PARTICLE_EMIT_RATE = 0.05
 CACHE_SIZE_LIMIT = 1000
+
+_IMAGE_CACHE = {}
+
+def _load_image_cached(path):
+    if path in _IMAGE_CACHE:
+        return _IMAGE_CACHE[path]
+    img = pygame.image.load(path).convert_alpha()
+    _IMAGE_CACHE[path] = img
+    return img
 
 class Camera:
     def __init__(self, width, height):
@@ -100,9 +111,10 @@ class ParticleEmitter:
         self.continuous = False
         self.emit_timer = 0
         self.emit_rate = PARTICLE_EMIT_RATE
-        
+
         if not hasattr(ParticleEmitter, '_surf_cache'):
-            ParticleEmitter._surf_cache = {}
+            from collections import OrderedDict
+            ParticleEmitter._surf_cache = OrderedDict()
 
     def _emit_particle(self):
         angle = math.radians(random.uniform(0, self.spread))
@@ -148,25 +160,32 @@ class ParticleEmitter:
 
     def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
         sw, sh = screen.get_width(), screen.get_height()
-        
+        cache = ParticleEmitter._surf_cache
+        blit = screen.blit
+
         for p in self.particles:
-            alpha = max(0, min(MAX_COLOR_VALUE, int(MAX_COLOR_VALUE * (p[4] / p[5]))))
+            life_ratio = p[4] / p[5] if p[5] > 0 else 0
+            alpha = max(0, min(MAX_COLOR_VALUE, int(MAX_COLOR_VALUE * life_ratio)))
             sx = int((p[0] - cam_x) * zoom)
             sy = int((p[1] - cam_y) * zoom)
-            sz = max(1, int(p[9] * zoom * (p[4] / p[5])))
-            
-            if 0 <= sx < sw and 0 <= sy < sh:
+            sz = max(1, int(p[9] * zoom * life_ratio))
+
+            if -sz <= sx < sw + sz and -sz <= sy < sh + sz:
                 cache_key = (sz, p[6], p[7], p[8], alpha)
-                if cache_key not in ParticleEmitter._surf_cache:
-                    if len(ParticleEmitter._surf_cache) > CACHE_SIZE_LIMIT:
-                        ParticleEmitter._surf_cache.clear()
+                surf = cache.get(cache_key)
+                if surf is None:
+                    if len(cache) >= CACHE_SIZE_LIMIT:
+                        cache.popitem(last=False)
                     surf = pygame.Surface((sz * 2, sz * 2), pygame.SRCALPHA)
                     pygame.draw.circle(surf, (p[6], p[7], p[8], alpha), (sz, sz), sz)
-                    ParticleEmitter._surf_cache[cache_key] = surf
-                
-                screen.blit(ParticleEmitter._surf_cache[cache_key], (sx - sz, sy - sz))
+                    cache[cache_key] = surf
+                else:
+                    cache.move_to_end(cache_key)
+                blit(surf, (sx - sz, sy - sz))
 
 class Light:
+    _gradient_cache = {}
+
     def __init__(self, x, y, radius=150, color=(255, 255, 200), intensity=200):
         self.x = float(x)
         self.y = float(y)
@@ -184,6 +203,22 @@ class Light:
         self.x += dx
         self.y += dy
 
+    @classmethod
+    def _get_gradient(cls, r, color, intensity):
+        key = (r, color[0], color[1], color[2], intensity)
+        surf = cls._gradient_cache.get(key)
+        if surf is not None:
+            return surf
+        if len(cls._gradient_cache) > 256:
+            cls._gradient_cache.clear()
+        surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+        cr, cg, cb = color[0], color[1], color[2]
+        for i in range(r, 0, -2):
+            alpha = max(0, min(255, int(intensity * (i / r))))
+            pygame.draw.circle(surf, (cr, cg, cb, alpha), (r, r), i)
+        cls._gradient_cache[key] = surf
+        return surf
+
     def draw(self, light_surface, cam_x=0, cam_y=0, zoom=1.0):
         if not self.visible:
             return
@@ -194,19 +229,17 @@ class Light:
             r += random.randint(-int(self.flicker_amount), int(self.flicker_amount))
         if r <= 0:
             return
-        light_surf = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
-        for i in range(r, 0, -2):
-            alpha = int(self.intensity * (i / r))
-            alpha = max(0, min(255, alpha))
-            col = (*self.color[:3], alpha)
-            pygame.draw.circle(light_surf, col, (r, r), i)
+        sw, sh = light_surface.get_width(), light_surface.get_height()
+        if sx + r < 0 or sy + r < 0 or sx - r > sw or sy - r > sh:
+            return
+        light_surf = Light._get_gradient(r, self.color, self.intensity)
         light_surface.blit(light_surf, (sx - r, sy - r), special_flags=pygame.BLEND_RGBA_ADD)
 
 class ParallaxLayer:
     def __init__(self, image_path, speed_factor=0.5):
         self.speed_factor = float(speed_factor)
         try:
-            self.image = pygame.image.load(image_path).convert_alpha()
+            self.image = _load_image_cached(image_path)
         except Exception:
             self.image = pygame.Surface((800, 600), pygame.SRCALPHA)
             self.image.fill((40, 40, 60, 100))
@@ -312,7 +345,7 @@ class AnimatedSprite:
         self.frames = []
 
         try:
-            sheet = pygame.image.load(sheet_path).convert_alpha()
+            sheet = _load_image_cached(sheet_path)
             cols = sheet.get_width() // self.frame_w
             for i in range(self.frame_count):
                 col = i % cols
@@ -328,6 +361,8 @@ class AnimatedSprite:
         self.image = self.frames[0]
         self.original_image = self.image
         self.rect = self.image.get_rect(topleft=(int(self.x), int(self.y)))
+        self._scaled_frames = None
+        self._scaled_factor = 1.0
 
     def update_rect(self):
         if self.is_centered:
@@ -350,9 +385,12 @@ class AnimatedSprite:
                         self.playing = False
                 self.original_image = self.frames[self.current_frame]
                 if self.scale_factor != 1.0:
-                    w = int(self.original_image.get_width() * self.scale_factor)
-                    h = int(self.original_image.get_height() * self.scale_factor)
-                    self.image = pygame.transform.scale(self.original_image, (w, h))
+                    if self._scaled_frames is None or self._scaled_factor != self.scale_factor:
+                        w = int(self.frame_w * self.scale_factor)
+                        h = int(self.frame_h * self.scale_factor)
+                        self._scaled_frames = [pygame.transform.scale(f, (w, h)) for f in self.frames]
+                        self._scaled_factor = self.scale_factor
+                    self.image = self._scaled_frames[self.current_frame]
                 else:
                     self.image = self.original_image
                 self.update_rect()
@@ -368,9 +406,15 @@ class AnimatedSprite:
 
     def set_scale(self, factor):
         self.scale_factor = float(factor)
-        w = int(self.original_image.get_width() * self.scale_factor)
-        h = int(self.original_image.get_height() * self.scale_factor)
-        self.image = pygame.transform.scale(self.original_image, (w, h))
+        if self.scale_factor == 1.0:
+            self._scaled_frames = None
+            self.image = self.original_image
+        else:
+            w = int(self.frame_w * self.scale_factor)
+            h = int(self.frame_h * self.scale_factor)
+            self._scaled_frames = [pygame.transform.scale(f, (w, h)) for f in self.frames]
+            self._scaled_factor = self.scale_factor
+            self.image = self._scaled_frames[self.current_frame]
         self.update_rect()
 
     def set_size(self, w, h):
@@ -387,9 +431,11 @@ class AnimatedSprite:
     def set_frame(self, f):
         self.current_frame = max(0, min(int(f), self.frame_count - 1))
         self.original_image = self.frames[self.current_frame]
-        self.image = self.original_image
-        if self.scale_factor != 1.0:
-            self.set_scale(self.scale_factor)
+        if self.scale_factor != 1.0 and self._scaled_frames is not None:
+            self.image = self._scaled_frames[self.current_frame]
+        else:
+            self.image = self.original_image
+        self.update_rect()
 
     def _get_drawn_image(self, zoom):
         if not hasattr(self, '_cache_state'):
@@ -455,7 +501,7 @@ class Tileset:
         self.tile_size = int(tile_size)
         self.tiles = []
         try:
-            sheet = pygame.image.load(image_path).convert_alpha()
+            sheet = _load_image_cached(image_path)
             cols = sheet.get_width() // self.tile_size
             rows = sheet.get_height() // self.tile_size
             for row in range(rows):
@@ -486,35 +532,58 @@ class Tilemap:
         self.visible = True
         self._cache = {}
 
+    def _iter_overlapping_tiles(self, sr):
+        ts = self.tile_size
+        if ts <= 0 or not self.data:
+            return
+        ox = int(self.x)
+        oy = int(self.y)
+        col_min = max(0, (sr.left - ox) // ts)
+        col_max = (sr.right - ox) // ts
+        row_min = max(0, (sr.top - oy) // ts)
+        row_max = (sr.bottom - oy) // ts
+        for row_idx in range(row_min, row_max + 1):
+            if row_idx < 0 or row_idx >= len(self.data):
+                continue
+            row = self.data[row_idx]
+            for col_idx in range(col_min, col_max + 1):
+                if col_idx < 0 or col_idx >= len(row):
+                    continue
+                yield row_idx, col_idx, row[col_idx]
+
     def collides(self, sprite, solid_ids=None):
         """Returns True if the sprite collides with any solid tile."""
-        if solid_ids is None:
-            solid_ids = [i for i in range(1, 9999)]
         sr = sprite.rect
         ts = self.tile_size
-        for row_idx, row in enumerate(self.data):
-            for col_idx, tile_id in enumerate(row):
-                if tile_id in solid_ids:
-                    tx = int(self.x) + col_idx * ts
-                    ty = int(self.y) + row_idx * ts
-                    tile_rect = pygame.Rect(tx, ty, ts, ts)
-                    if sr.colliderect(tile_rect):
-                        return True
+        ox = int(self.x)
+        oy = int(self.y)
+        solid_set = set(solid_ids) if solid_ids is not None else None
+        for row_idx, col_idx, tile_id in self._iter_overlapping_tiles(sr):
+            if solid_set is None:
+                if tile_id <= 0:
+                    continue
+            elif tile_id not in solid_set:
+                continue
+            tile_rect = pygame.Rect(ox + col_idx * ts, oy + row_idx * ts, ts, ts)
+            if sr.colliderect(tile_rect):
+                return True
         return False
 
     def get_colliding_tile(self, sprite, solid_ids=None):
-        if solid_ids is None:
-            solid_ids = [i for i in range(1, 9999)]
         sr = sprite.rect
         ts = self.tile_size
-        for row_idx, row in enumerate(self.data):
-            for col_idx, tile_id in enumerate(row):
-                if tile_id in solid_ids:
-                    tx = int(self.x) + col_idx * ts
-                    ty = int(self.y) + row_idx * ts
-                    tile_rect = pygame.Rect(tx, ty, ts, ts)
-                    if sr.colliderect(tile_rect):
-                        return tile_rect
+        ox = int(self.x)
+        oy = int(self.y)
+        solid_set = set(solid_ids) if solid_ids is not None else None
+        for row_idx, col_idx, tile_id in self._iter_overlapping_tiles(sr):
+            if solid_set is None:
+                if tile_id <= 0:
+                    continue
+            elif tile_id not in solid_set:
+                continue
+            tile_rect = pygame.Rect(ox + col_idx * ts, oy + row_idx * ts, ts, ts)
+            if sr.colliderect(tile_rect):
+                return tile_rect
         return None
 
     def draw(self, screen, cam_x=0, cam_y=0, zoom=1.0):
@@ -667,7 +736,7 @@ class Sprite:
         self.mass = 1.0
         self.physics_enabled = False
         try:
-            self.original_image = pygame.image.load(image_path).convert_alpha()
+            self.original_image = _load_image_cached(image_path).copy()
             self.image = self.original_image
         except Exception:
             self.original_image = pygame.Surface((50, 50), pygame.SRCALPHA)
@@ -893,7 +962,14 @@ class MiniEngine:
         self.dialog_visible_chars = 0
         self.dialog_timer = 0
         self.dialog_speed = 0.05
-        self.dialog_font = None
+        pygame.font.init()
+        self.dialog_font = pygame.font.SysFont("Verdana", 20, bold=True)
+        self.dialog_body_font = pygame.font.SysFont("Verdana", 18)
+
+        self._light_surface = None
+        self._fade_surface = None
+        self._scanline_surface = None
+        self._scanline_intensity_cached = -1.0
 
     def set_fps(self, fps):
         self.fps = int(fps)
@@ -1107,20 +1183,27 @@ class MiniEngine:
     def screen_shake(self, intensity=10, duration=0.3):
         self.camera.shake(intensity, duration)
 
-    def raycast(self, x1, y1, x2, y2, targets=None):
+    def raycast(self, x1, y1, x2, y2, targets=None, step=4):
         if targets is None:
             targets = self.sprites
         dx = x2 - x1
         dy = y2 - y1
-        steps = max(abs(int(dx)), abs(int(dy)), 1)
+        length = math.hypot(dx, dy)
+        if length <= 0:
+            return None
+        step = max(1, int(step))
+        steps = max(1, int(length / step))
         step_x = dx / steps
         step_y = dy / steps
-        for i in range(steps):
-            px = x1 + step_x * i
-            py = y1 + step_y * i
-            for t in targets:
-                if hasattr(t, 'rect') and t.rect.collidepoint(int(px), int(py)):
+        rect_targets = [t for t in targets if hasattr(t, 'rect')]
+        px, py = x1, y1
+        for _ in range(steps + 1):
+            ipx, ipy = int(px), int(py)
+            for t in rect_targets:
+                if t.rect.collidepoint(ipx, ipy):
                     return t
+            px += step_x
+            py += step_y
         return None
 
     def wait(self, seconds, callback):
@@ -1170,26 +1253,26 @@ class MiniEngine:
         self.dialog_visible_chars = 0
         self.dialog_timer = 0
         self.dialog_speed = float(speed)
-        if self.dialog_font is None:
-            self.dialog_font = pygame.font.SysFont("Verdana", 20, bold=True)
-            self.dialog_body_font = pygame.font.SysFont("Verdana", 18)
 
     def save_var(self, name, val, path):
-        import json
         try:
             data = {}
             if os.path.exists(path):
                 with open(path, 'r') as f: data = json.load(f)
             data[name] = val
             with open(path, 'w') as f: json.dump(data, f)
-        except: pass
+        except (IOError, OSError, ValueError) as e:
+            print(f"save_var failed for '{name}' -> {path}: {e}")
 
     def load_var(self, path, name, default=0):
-        import json
         try:
             with open(path, 'r') as f: data = json.load(f)
             return data.get(name, default)
-        except: return default
+        except FileNotFoundError:
+            return default
+        except (IOError, OSError, ValueError) as e:
+            print(f"load_var failed for '{name}' from {path}: {e}")
+            return default
 
     def lerp(self, a, b, t):
         return a + (b - a) * max(0, min(1, float(t)))
@@ -1256,16 +1339,22 @@ class MiniEngine:
         if self.crt_enabled:
             try:
                 w, h = surface.get_width(), surface.get_height()
-                scanline_surf = pygame.Surface((w, h), pygame.SRCALPHA)
-                alpha = max(10, min(120, int(120 * self.crt_intensity)))
-                for y in range(0, h, 2):
-                    pygame.draw.line(scanline_surf, (0, 0, 0, alpha), (0, y), (w, y))
-                surface.blit(scanline_surf, (0, 0))
-                vign = pygame.Surface((w, h), pygame.SRCALPHA)
-                for dist in range(min(w, h) // 3, 0, -10):
-                    a_v = max(0, min(120, int(alpha * (1 - dist / (min(w, h) // 3)))))
-                    pygame.draw.ellipse(vign, (0, 0, 0, a_v // 4), (w // 2 - dist, h // 2 - dist, dist * 2, dist * 2), 30)
-                surface.blit(vign, (0, 0))
+                if (self._scanline_surface is None
+                        or self._scanline_surface.get_size() != (w, h)
+                        or self._scanline_intensity_cached != self.crt_intensity):
+                    scanline_surf = pygame.Surface((w, h), pygame.SRCALPHA)
+                    alpha = max(10, min(120, int(120 * self.crt_intensity)))
+                    for y in range(0, h, 2):
+                        pygame.draw.line(scanline_surf, (0, 0, 0, alpha), (0, y), (w, y))
+                    base = min(w, h) // 3
+                    if base > 0:
+                        for dist in range(base, 0, -10):
+                            a_v = max(0, min(120, int(alpha * (1 - dist / base))))
+                            pygame.draw.ellipse(scanline_surf, (0, 0, 0, a_v // 4),
+                                                (w // 2 - dist, h // 2 - dist, dist * 2, dist * 2), 30)
+                    self._scanline_surface = scanline_surf
+                    self._scanline_intensity_cached = self.crt_intensity
+                surface.blit(self._scanline_surface, (0, 0))
             except Exception:
                 pass
 
@@ -1360,10 +1449,10 @@ class MiniEngine:
         logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
         try:
             logo_img = pygame.image.load(logo_path).convert_alpha()
-        except:
+        except (pygame.error, FileNotFoundError):
             try:
                 logo_img = pygame.image.load("logo.png").convert_alpha()
-            except:
+            except (pygame.error, FileNotFoundError):
                 print("CRITICAL: Protection Cavern-Engine activated. Cannot start without logo.png at root.")
                 sys.exit(1)
 
@@ -1372,8 +1461,12 @@ class MiniEngine:
 
         pygame.font.init()
         font_splash = pygame.font.SysFont("Verdana", 24, bold=True)
-        text_splash = font_splash.render("BUILT WITH CAVERN-ENGINE 2026.3", True, (255, 255, 255))
+        text_splash = font_splash.render(f"BUILT WITH CAVERN-ENGINE V{CAVERN_VERSION}", True, (255, 255, 255))
         text_rect = text_splash.get_rect(center=(self.screen.get_width()//2, self.screen.get_height()//2 + 150))
+
+        font_easter = pygame.font.SysFont("Verdana", 24, bold=False, italic=True)
+        easter_surf = font_easter.render("caperuisseau | Cavern-Engine", True, (150, 150, 255))
+        easter_rect = easter_surf.get_rect(center=(self.screen.get_width()//2, self.screen.get_height()//2 + 200))
 
         show_splash = not MiniEngine._splash_shown
         if show_splash:
@@ -1394,9 +1487,6 @@ class MiniEngine:
             self.screen.blit(text_splash, text_rect)
 
             if caperuisseau_activated:
-                font_easter = pygame.font.SysFont("Verdana", 24, bold=False, italic=True)
-                easter_surf = font_easter.render("caperuisseau | Cavern-Engine", True, (150, 150, 255))
-                easter_rect = easter_surf.get_rect(center=(self.screen.get_width()//2, self.screen.get_height()//2 + 200))
                 self.screen.blit(easter_surf, easter_rect)
 
             pygame.display.flip()
@@ -1489,11 +1579,12 @@ class MiniEngine:
                 btn.draw(self.screen, 0, 0, 1.0)
 
             if self.use_lighting and self.lights:
-                light_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-                light_surface.fill((*self.ambient_light, 255))
+                if self._light_surface is None or self._light_surface.get_size() != (self.width, self.height):
+                    self._light_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                self._light_surface.fill((*self.ambient_light, 255))
                 for light in self.lights:
-                    light.draw(light_surface, cam_x, cam_y, self.camera.zoom)
-                self.screen.blit(light_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                    light.draw(self._light_surface, cam_x, cam_y, self.camera.zoom)
+                self.screen.blit(self._light_surface, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
 
             if self.debug_hitbox:
                 self._draw_debug_hitboxes()
@@ -1521,9 +1612,10 @@ class MiniEngine:
                         self.dialog_active = False
 
             if self.fade_alpha > 0:
-                fade_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-                fade_surf.fill((0, 0, 0, int(self.fade_alpha)))
-                self.screen.blit(fade_surf, (0, 0))
+                if self._fade_surface is None or self._fade_surface.get_size() != (self.width, self.height):
+                    self._fade_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+                self._fade_surface.fill((0, 0, 0, int(self.fade_alpha)))
+                self.screen.blit(self._fade_surface, (0, 0))
 
             pygame.display.flip()
         pygame.quit()
@@ -1661,8 +1753,15 @@ def parse_action(act_str, dt=False):
             return f'engine.wait({time_val}, lambda: {sub_action})'
         elif m[0] == "SET":
             parts = act_str.split("=", 1)
-            nom = parts[0].strip().split(None, 1)[1]
+            if len(parts) < 2:
+                raise Exception("SET requires format: SET name = value")
+            head_tokens = parts[0].strip().split(None, 1)
+            if len(head_tokens) < 2:
+                raise Exception("SET requires a target name before '='")
+            nom = head_tokens[1].strip()
             val = parts[1].strip()
+            if not val:
+                raise Exception("SET requires a value after '='")
             if "." in nom:
                 obj, attr = nom.rsplit(".", 1)
                 return f"setattr({obj}, '{attr}', {val})"
@@ -1685,7 +1784,8 @@ def parser_langage_caverne(chemin_source, chemin_destination):
                 try:
                     with open(match.group(1), 'r') as imp_f:
                         lignes.extend(imp_f.readlines())
-                except: pass
+                except (IOError, OSError) as e:
+                    print(f"IMPORT '{match.group(1)}' a échoué : {e}")
         else:
             lignes.append(lb)
 
